@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>কাস্টম টাইমার</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: system-ui, "Noto Sans Bengali", sans-serif;
+    background: #1e1b2e; color: #f1f1f5;
+    margin: 0; padding: 20px;
+    display: flex; justify-content: center;
+  }
+  .card {
+    background: #2a2640; border-radius: 16px; padding: 24px;
+    width: 100%; max-width: 480px;
+    box-shadow: 0 10px 30px rgba(0,0,0,.4);
+  }
+  h1 { text-align: center; margin: 0 0 12px; font-size: 1.5rem; }
+  .display {
+    font-size: 3.2rem; text-align: center; font-weight: 700;
+    font-variant-numeric: tabular-nums; color: #a78bfa; margin: 10px 0 20px;
+  }
+  label { font-size: .9rem; opacity: .85; display: block; margin: 12px 0 6px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .unit { text-align: center; }
+  .unit small { display: block; opacity: .7; margin-top: 4px; font-size: .75rem; }
+  input, select, button {
+    font: inherit; border-radius: 10px; border: 1px solid #444;
+    padding: 10px; background: #16132a; color: #fff;
+  }
+  input[type=number] { width: 72px; text-align: center; }
+  input[type=file] { width: 100%; font-size: .85rem; }
+  select { flex: 1; min-width: 120px; }
+  button { cursor: pointer; background: #7c3aed; border: none; font-weight: 600; }
+  button:hover:not(:disabled) { background: #6d28d9; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  button.secondary { background: #4b4563; }
+  button.danger { background: #dc2626; }
+  .controls { display: flex; gap: 8px; margin-top: 16px; }
+  .controls button { flex: 1; padding: 12px; }
+  .section { margin-top: 22px; border-top: 1px solid #3d3760; padding-top: 14px; }
+  .cue {
+    display: flex; justify-content: space-between; align-items: center;
+    background: #16132a; border-radius: 10px; padding: 8px 12px; margin-bottom: 6px;
+    font-size: .92rem;
+  }
+  .cue.done { opacity: .4; text-decoration: line-through; }
+  .cue button { padding: 4px 10px; font-size: .8rem; background: #991b1b; }
+  .count { font-size: .85rem; opacity: .7; margin-bottom: 6px; }
+  .empty { opacity: .6; font-size: .85rem; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>⏱️ কাস্টম টাইমার</h1>
+  <div class="display" id="display">00:10:00</div>
+
+  <label>টাইমারের সময়</label>
+  <div class="row">
+    <div class="unit"><input type="number" id="h" min="0" max="23" value="0"><small>ঘণ্টা</small></div>
+    <div class="unit"><input type="number" id="m" min="0" max="59" value="10"><small>মিনিট</small></div>
+    <div class="unit"><input type="number" id="s" min="0" max="59" value="0"><small>সেকেন্ড</small></div>
+  </div>
+
+  <label>শেষের সাউন্ড</label>
+  <div class="row"><select id="endSound"></select></div>
+
+  <label>নিজের সাউন্ড ফাইল (ঐচ্ছিক)</label>
+  <input type="file" id="customFile" accept="audio/*">
+
+  <div class="section">
+    <label>মাঝের সাউন্ড (সর্বোচ্চ ২০টি)</label>
+    <div class="row">
+      <div class="unit"><input type="number" id="cm" min="0" value="2"><small>মিনিট</small></div>
+      <div class="unit"><input type="number" id="cs" min="0" max="59" value="0"><small>সেকেন্ড</small></div>
+      <select id="cueSound"></select>
+      <button id="addCue">+ যোগ</button>
+    </div>
+    <div class="count" id="cueCount"></div>
+    <div id="cueList"></div>
+  </div>
+
+  <div class="controls">
+    <button id="startBtn">▶ শুরু</button>
+    <button id="pauseBtn" class="secondary" disabled>⏸ থামাও</button>
+    <button id="resetBtn" class="danger">↺ রিসেট</button>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const MAX_CUES = 20;
+const pad = n => String(n).padStart(2, '0');
+
+const builtIn = { beep: 'বিপ', bell: 'ঘণ্টা', chime: 'চাইম', alarm: 'অ্যালার্ম' };
+
+let state = 'idle';          // idle | running | paused | done
+let cues = [];               // { id, ms, sound, fired }
+let nextId = 1;
+let totalMs = 0;
+let accumulated = 0;
+let startedAt = 0;
+let timer = null;
+let customUrl = null;
+let audioCtx = null;
+
+/* ---------- Sound ---------- */
+function getCtx() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  return audioCtx;
+}
+function tone(freq, start, dur, type = 'sine', vol = 0.4) {
+  const ctx = getCtx();
+  const o = ctx.createOscillator(), g = ctx.createGain();
+  o.type = type; o.frequency.value = freq;
+  const t = ctx.currentTime + start;
+  g.gain.setValueAtTime(vol, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g).connect(ctx.destination);
+  o.start(t); o.stop(t + dur);
+}
+const patterns = {
+  beep:  () => { for (let i = 0; i < 3; i++) tone(880, i * 0.4, 0.25, 'square', 0.2); },
+  bell:  () => { tone(660, 0, 1.5, 'sine', 0.5); tone(1320, 0, 1, 'sine', 0.2); },
+  chime: () => { [523, 659, 784, 1046].forEach((f, i) => tone(f, i * 0.25, 0.6, 'triangle', 0.35)); },
+  alarm: () => { for (let i = 0; i < 6; i++) tone(i % 2 ? 600 : 900, i * 0.3, 0.28, 'sawtooth', 0.15); }
+};
+function playSound(key) {
+  if (key === 'custom') {
+    if (customUrl) new Audio(customUrl).play().catch(() => {});
+    return;
+  }
+  if (patterns[key]) patterns[key]();
+}
+function soundName(key) {
+  return key === 'custom' ? 'কাস্টম সাউন্ড' : (builtIn[key] || key);
+}
+
+/* ---------- Setup ---------- */
+function fillSelects() {
+  const opts = Object.entries(builtIn).map(([k, v]) => `<option value="${k}">${v}</option>`).join('');
+  $('endSound').innerHTML = opts;
+  $('cueSound').innerHTML = opts;
+  $('endSound').value = 'bell';
+}
+
+$('customFile').addEventListener('change', e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  if (customUrl) URL.revokeObjectURL(customUrl);
+  customUrl = URL.createObjectURL(f);
+  ['endSound', 'cueSound'].forEach(id => {
+    const sel = $(id);
+    if (!sel.querySelector('option[value="custom"]')) sel.add(new Option('কাস্টম সাউন্ড', 'custom'));
+  });
+  alert('কাস্টম সাউন্ড যোগ হয়েছে। এখন শেষের বা মাঝের সাউন্ড হিসেবে বেছে নিতে পারবেন।');
+});
+
+/* ---------- Time helpers ---------- */
+function getInputTotalMs() {
+  const h = parseInt($('h').value) || 0;
+  const m = parseInt($('m').value) || 0;
+  const s = parseInt($('s').value) || 0;
+  return (h * 3600 + m * 60 + s) * 1000;
+}
+function fmt(ms) {
+  const t = Math.ceil(ms / 1000);
+  return `${pad(Math.floor(t / 3600))}:${pad(Math.floor((t % 3600) / 60))}:${pad(t % 60)}`;
+}
+function elapsed() {
+  return accumulated + (state === 'running' ? Date.now() - startedAt : 0);
+}
+
+/* ---------- Cues ---------- */
+function renderCues() {
+  $('cueCount').textContent = `${cues.length} / ${MAX_CUES} টি যোগ হয়েছে`;
+  $('cueList').innerHTML = cues.length
+    ? cues.map(c => `
+        <div class="cue ${c.fired ? 'done' : ''}">
+          <span>⏰ ${fmt(c.ms)} পরে → ${soundName(c.sound)}</span>
+          <button onclick="removeCue(${c.id})">✕</button>
+        </div>`).join('')
+    : '<div class="empty">কোনো মাঝের সাউন্ড যোগ করা হয়নি</div>';
+}
+window.removeCue = id => {
+  if (state === 'running') return;
+  cues = cues.filter(c => c.id !== id);
+  renderCues();
+};
+
+$('addCue').onclick = () => {
+  if (cues.length >= MAX_CUES) return alert(`সর্বোচ্চ ${MAX_CUES}টি সাউন্ড যোগ করা যাবে`);
+  const ms = (parseInt($('cm').value || 0) * 60 + parseInt($('cs').value || 0)) * 1000;
+  const total = state === 'idle' || state === 'done' ? getInputTotalMs() : totalMs;
+  if (ms <= 0 || ms >= total) return alert('সময়টি ০ থেকে মোট টাইমারের মধ্যে হতে হবে');
+  if (state === 'running' && ms <= elapsed()) return alert('এই সময় ইতিমধ্যে পার হয়ে গেছে');
+  cues.push({ id: nextId++, ms, sound: $('cueSound').value, fired: false });
+  cues.sort((a, b) => a.ms - b.ms);
+  renderCues();
+};
+
+/* ---------- Timer engine ---------- */
+function tick() {
+  const el = elapsed();
+  $('display').textContent = fmt(Math.max(0, totalMs - el));
+
+  let firedAny = false;
+  for (const c of cues) {
+    if (!c.fired && el >= c.ms) {
+      c.fired = true;
+      playSound(c.sound);
+      firedAny = true;
+    }
+  }
+  if (firedAny) renderCues();
+
+  if (el >= totalMs) finish();
+}
+
+function finish() {
+  clearInterval(timer);
+  timer = null;
+  state = 'done';
+  accumulated = 0;
+  $('display').textContent = '00:00:00';
+  playSound($('endSound').value);
+  setButtons();
+}
+
+function setButtons() {
+  const idle = state === 'idle' || state === 'done';
+  $('startBtn').disabled = state === 'running';
+  $('startBtn').textContent = state === 'paused' ? '▶ চালিয়ে যাও' : '▶ শুরু';
+  $('pauseBtn').disabled = state !== 'running';
+  ['h', 'm', 's'].forEach(id => $(id).disabled = !idle);
+}
+
+$('startBtn').onclick = () => {
+  if (state === 'idle' || state === 'done') {
+    totalMs = getInputTotalMs();
+    if (totalMs <= 0) return alert('টাইমারের সময় দিন');
+    accumulated = 0;
+    cues = cues.filter(c => c.ms < totalMs);
+    cues.forEach(c => c.fired = false);
+    renderCues();
+  }
+  getCtx(); // ব্রাউজারে অডিও চালু করার জন্য ইউজার ক্লিকের সময় এটি দরকার
+  startedAt = Date.now();
+  state = 'running';
+  timer = setInterval(tick, 200);
+  tick();
+  setButtons();
+};
+
+$('pauseBtn').onclick = () => {
+  accumulated += Date.now() - startedAt;
+  clearInterval(timer);
+  timer = null;
+  state = 'paused';
+  setButtons();
+};
+
+$('resetBtn').onclick = () => {
+  clearInterval(timer);
+  timer = null;
+  state = 'idle';
+  accumulated = 0;
+  cues.forEach(c => c.fired = false);
+  renderCues();
+  $('display').textContent = fmt(getInputTotalMs());
+  setButtons();
+};
+
+['h', 'm', 's'].forEach(id => $(id).addEventListener('input', () => {
+  if (state === 'idle' || state === 'done') $('display').textContent = fmt(getInputTotalMs());
+}));
+
+/* ---------- Init ---------- */
+fillSelects();
+renderCues();
+$('display').textContent = fmt(getInputTotalMs());
+setButtons();
+</script>
+</body>
+</html>
